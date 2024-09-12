@@ -1,0 +1,383 @@
+// React and Remix
+import { useEffect } from "react";
+import {
+  type MetaFunction,
+  type ActionFunctionArgs,
+  json,
+  TypedResponse,
+} from "@remix-run/node";
+
+import {
+  Form,
+  useActionData,
+  useNavigation,
+  isRouteErrorResponse,
+  useRouteError,
+} from "@remix-run/react";
+
+// Services
+import { saveDescription } from "~/services/save-description.server";
+import { getTranscript } from "~/services/get-transcript.server";
+import { generateContent } from "~/services/generate";
+
+// Utils
+import { extractYouTubeID, renderMessage } from "~/lib/utils";
+
+// Components
+import { Button } from "~/components/ui/button";
+import { Input } from "~/components/ui/input";
+import { Textarea } from "~/components/ui/textarea";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "~/components/ui/select";
+
+// Page meta data
+export const meta: MetaFunction = () => [
+  { title: "YouTube Description Generator" },
+  {
+    name: "description",
+    content: "Generate and save YouTube video descriptions",
+  },
+];
+
+// Add this interface definition
+interface ActionResponse {
+  error: boolean;
+  message: string;
+  data?: {
+    content: string;
+    videoId: string;
+    transcript: string;
+    type: "summary" | "description" | "blogpost" | "outline";
+  };
+}
+
+// Update the action function signature
+export async function action({
+  request,
+}: ActionFunctionArgs): Promise<TypedResponse<ActionResponse>> {
+  const formData = await request.formData();
+  const formItems = Object.fromEntries(formData);
+  const videoId = extractYouTubeID(formItems.videoId as string);
+
+  const type = formItems.type as
+    | "summary"
+    | "description"
+    | "blogpost"
+    | "outline";
+
+  if (!videoId) return json({ error: true, message: "Invalid video ID" });
+
+  switch (formItems._action) {
+    case "generate": {
+      const transcript = await getTranscript(videoId);
+
+      if (!transcript)
+        return json({ error: true, message: "Failed to fetch transcript" });
+
+      const content = await generateContent({ type, transcript });
+
+      return json({
+        error: false,
+        message: `${type.charAt(0).toUpperCase() + type.slice(1)} generated!`,
+        data: {
+          content: content.toString(),
+          videoId,
+          transcript,
+          type,
+        },
+      });
+    }
+    case "save":
+      await saveDescription(formData);
+      return json({ message: "Saved!", error: false });
+    default:
+      return json({ message: "No action found!", error: true });
+  }
+}
+
+export default function DashboardIndexRoute() {
+  const formActionData = useActionData<typeof action>();
+
+  useEffect(() => {
+    if (formActionData) {
+      renderMessage(
+        formActionData.message,
+        formActionData.error ? "error" : "success"
+      );
+    }
+  }, [formActionData]);
+
+  return (
+    <div className="container mx-auto">
+      <div key={formActionData?.data?.videoId} className="flex flex-col gap-4">
+        <GenerateForm />
+        <SaveDescriptionForm data={formActionData?.data} />
+      </div>
+    </div>
+  );
+}
+
+function GenerateForm() {
+  const navigation = useNavigation();
+  const isSubmitting = navigation.formData?.get("_action") === "generate";
+
+  return (
+    <Form method="POST">
+      <fieldset
+        disabled={isSubmitting}
+        className="flex gap-2 items-center justify-center my-4"
+      >
+        <Input
+          name="videoId"
+          placeholder="Youtube Video ID or URL"
+          className="w-full"
+          required
+        />
+        <Select name="type" defaultValue="summary">
+          <SelectTrigger className="w-[180px]">
+            <SelectValue placeholder="Select type" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="summary">Summary</SelectItem>
+            <SelectItem value="description">Description</SelectItem>
+            <SelectItem value="blogpost">Blogpost</SelectItem>
+            <SelectItem value="outline">Outline</SelectItem>
+          </SelectContent>
+        </Select>
+        <Button name="_action" value="generate" type="submit">
+          {isSubmitting ? "Generating..." : "Generate"}
+        </Button>
+      </fieldset>
+    </Form>
+  );
+}
+
+function SaveDescriptionForm({
+  data,
+}: {
+  readonly data?: {
+    videoId: string;
+    content: string;
+    transcript: string;
+    type: "summary" | "description" | "blogpost" | "outline";
+  };
+}) {
+  const navigation = useNavigation();
+  const isSubmitting = navigation.formData?.get("_action") === "save";
+
+  if (!data) return null;
+
+  return (
+    <Form method="POST" className="w-full">
+      <fieldset disabled={isSubmitting}>
+        <Textarea
+          name="content"
+          className="w-full h-[400px]"
+          defaultValue={data.content}
+        />
+        <input type="hidden" name="videoId" defaultValue={data.videoId} />
+        <input type="hidden" name="transcript" defaultValue={data.transcript} />
+        <input type="hidden" name="type" defaultValue={data.type} />
+        <Button
+          name="_action"
+          value="save"
+          className="float-right my-2"
+          type="submit"
+        >
+          {isSubmitting
+            ? "Saving..."
+            : `Save ${data.type.charAt(0).toUpperCase() + data.type.slice(1)}`}
+        </Button>
+      </fieldset>
+    </Form>
+  );
+}
+
+export function ErrorBoundary() {
+  const error = useRouteError();
+
+  if (isRouteErrorResponse(error)) {
+    return (
+      <div>
+        <h1>
+          {error.status} {error.statusText}
+        </h1>
+        <p>{error.data}</p>
+      </div>
+    );
+  } else if (error instanceof Error) {
+    return (
+      <div>
+        <h1>Error</h1>
+        <p>{error.message}</p>
+        <p>The stack trace is:</p>
+        <pre>{error.stack}</pre>
+      </div>
+    );
+  } else {
+    return <h1>Unknown Error</h1>;
+  }
+}
+
+
+
+
+
+
+
+
+import React from "react";
+import { LoaderFunctionArgs, json, ActionFunctionArgs } from "@remix-run/node";
+import { dataAPI } from "~/lib/data-api";
+import {
+  useLoaderData,
+  isRouteErrorResponse,
+  useRouteError,
+  useFetcher,
+  Link,
+} from "@remix-run/react";
+
+
+import { YouTubePlayer } from "~/components/custom/youtube-player";
+import { TextareaCustom } from "~/components/custom/textarea-custom";
+import { Button } from "~/components/ui/button";
+import { Spinner } from "~/components/custom/spinner";
+import { TrashIcon, MessageCircleIcon } from "lucide-react";
+import { ResizableLayout } from "~/components/custom/resizable-layout";
+
+export async function action({ request }: ActionFunctionArgs) {
+  const formData = await request.formData();
+  const action = formData.get("_action");
+  const videoId = formData.get("videoId");
+  
+
+  console.log("action", action);
+  console.log("videoId", videoId);
+
+  switch (action) {
+    case "delete":
+      await dataAPI(`http://localhost:1338/api/videos/${videoId}`, {
+        method: "DELETE",
+      });
+      break;
+    case "update":
+      await dataAPI(`http://localhost:1338/api/videos/${videoId}`, {
+        method: "PUT",
+        body: formData,
+      });
+      break;
+  }
+
+  return json({ videoId });
+}
+
+// Remix Route
+export async function loader({ params }: LoaderFunctionArgs) {
+  const { videoId } = params;
+
+  const transcript = await dataAPI(
+    `http://localhost:1338/api/videos?filters[videoId][$eq]=${videoId}`,
+    { method: "GET" }
+  );
+
+  if (!transcript?.data?.length) {
+    throw new Response("Not Found", {
+      status: 404,
+    });
+  }
+
+  return json({ videoId, transcript });
+}
+
+export default function VideosByIdRoute() {
+  const { transcript } = useLoaderData<typeof loader>();
+  const item = transcript.data[0];
+  const fetcher = useFetcher();
+  const isUpdating = fetcher.formData?.get("_action") === "update";
+  const isDeleting = fetcher.formData?.get("_action") === "delete";
+
+  return (
+    <React.Fragment>
+      <ResizableLayout width={[45, 55]}>
+        <div className="relative">
+          <YouTubePlayer
+            key={item.id}
+            playerKey={item.id}
+            id={item.videoId}
+          />
+
+          <fetcher.Form method="POST">
+            <fieldset disabled={isUpdating}>
+              <TextareaCustom
+                name="description"
+                className="w-full mb-5"
+                defaultValue={item.modifiedTranscript}
+              />
+              <input type="hidden" name="videoId" value={item.id} />
+              <Button
+                name="_action"
+                value="update"
+                className="absolute top-4 right-20"
+                type="submit"
+              >
+                {isUpdating ? <Spinner /> : "Update"}
+              </Button>
+            </fieldset>
+          </fetcher.Form>
+          <fetcher.Form method="POST">
+            <fieldset disabled={isDeleting}>
+              <Button
+                name="_action"
+                value="delete"
+                className="absolute left-4 top-4 bg-red-700 hover:bg-red-600"
+                type="submit"
+              >
+                {isDeleting ? <Spinner /> : <TrashIcon className="w-4 h-4" />}
+              </Button>
+              <input type="hidden" name="videoId" value={item.id} />
+            </fieldset>
+          </fetcher.Form>
+          <footer>
+            <Link to={`/dashboard/chat/${item.videoId}`}>
+              <Button className="absolute right-4 top-4 bg-violet-600 hover:bg-violet-500">
+                <MessageCircleIcon className="w-4 h-4" />
+              </Button>
+            </Link>
+          </footer>
+        </div>
+        <div>col 2</div>
+      </ResizableLayout>
+    </React.Fragment>
+  );
+}
+
+export function ErrorBoundary() {
+  const error = useRouteError();
+
+  if (isRouteErrorResponse(error)) {
+    return (
+      <div>
+        <h1>
+          {error.status} {error.statusText}
+        </h1>
+        <p>{error.data}</p>
+      </div>
+    );
+  } else if (error instanceof Error) {
+    return (
+      <div>
+        <h1>Error</h1>
+        <p>{error.message}</p>
+        <p>The stack trace is:</p>
+        <pre>{error.stack}</pre>
+      </div>
+    );
+  } else {
+    return <h1>Unknown Error</h1>;
+  }
+}
